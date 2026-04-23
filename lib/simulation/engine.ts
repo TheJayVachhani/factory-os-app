@@ -1,3 +1,5 @@
+import { getFactoryStore } from "@/lib/factory/store";
+
 export type BatchStage =
   | "queue"
   | "procurement"
@@ -100,11 +102,188 @@ function seedBatches(): SimBatch[] {
   ];
 }
 
+// ── DB sync helpers (only active when DATA_SOURCE=db) ────────────────────────
+
+function isDbMode(): boolean {
+  return process.env.DATA_SOURCE === "db";
+}
+
+function syncStateToDb(state: SimState): void {
+  if (!isDbMode()) return;
+  // Dynamic require keeps better-sqlite3 out of the module graph in sim mode
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { db } = require("@/lib/db/client") as typeof import("@/lib/db/client");
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const schema = require("@/lib/db/schema") as typeof import("@/lib/db/schema");
+  const { eq } = require("drizzle-orm") as typeof import("drizzle-orm");
+
+  // Upsert sim_state
+  const existing = db.select().from(schema.simState).where(eq(schema.simState.id, 1)).get();
+  if (existing) {
+    db.update(schema.simState)
+      .set({ currentDay: state.currentDay, lastEventId: state.lastEvent?.id ?? null })
+      .where(eq(schema.simState.id, 1))
+      .run();
+  } else {
+    db.insert(schema.simState)
+      .values({ id: 1, currentDay: state.currentDay, lastEventId: state.lastEvent?.id ?? null })
+      .run();
+  }
+
+  // Replace all batches
+  db.delete(schema.simBatches).run();
+  if (state.batches.length > 0) {
+    db.insert(schema.simBatches).values(
+      state.batches.map((batch) => ({
+        id: batch.id,
+        productId: batch.productId,
+        productLabel: batch.productLabel,
+        lineId: batch.lineId,
+        supplierId: batch.supplierId,
+        quantity: batch.quantity,
+        stage: batch.stage,
+        daysInStage: batch.daysInStage,
+        baseDays: batch.baseDays,
+        delayDays: batch.delayDays,
+        flags: JSON.stringify(batch.flags),
+        startDay: batch.startDay,
+      }))
+    ).run();
+  }
+
+  // Upsert events
+  for (const event of state.eventLog) {
+    const existingEvent = db.select().from(schema.simEvents)
+      .where(eq(schema.simEvents.id, event.id)).get();
+    if (!existingEvent) {
+      db.insert(schema.simEvents).values({
+        id: event.id,
+        label: event.label,
+        description: event.description,
+        day: event.day,
+        triggeredAt: Date.now(),
+      }).run();
+    }
+  }
+
+  // Upsert recommendations
+  const currentRecIds = new Set([
+    ...state.pendingRecs.map((r) => r.id),
+    ...state.appliedRecs.map((r) => r.id),
+  ]);
+  for (const rec of state.pendingRecs) {
+    const existingRec = db.select().from(schema.simRecommendations)
+      .where(eq(schema.simRecommendations.id, rec.id)).get();
+    if (!existingRec) {
+      db.insert(schema.simRecommendations).values({
+        id: rec.id,
+        eventId: state.lastEvent?.id ?? "",
+        label: rec.label,
+        reasoning: rec.reasoning,
+        effectType: rec.effectType,
+        effectParams: JSON.stringify(rec.effectParams),
+        status: "pending",
+        appliedAt: null,
+      }).run();
+    }
+  }
+  for (const rec of state.appliedRecs) {
+    const existingRec = db.select().from(schema.simRecommendations)
+      .where(eq(schema.simRecommendations.id, rec.id)).get();
+    if (existingRec && existingRec.status !== "applied") {
+      db.update(schema.simRecommendations)
+        .set({ status: "applied", appliedAt: Date.now() })
+        .where(eq(schema.simRecommendations.id, rec.id))
+        .run();
+    } else if (!existingRec) {
+      db.insert(schema.simRecommendations).values({
+        id: rec.id,
+        eventId: state.lastEvent?.id ?? "",
+        label: rec.label,
+        reasoning: rec.reasoning,
+        effectType: rec.effectType,
+        effectParams: JSON.stringify(rec.effectParams),
+        status: "applied",
+        appliedAt: Date.now(),
+      }).run();
+    }
+  }
+  // Mark recs that are no longer pending/applied as ignored
+  const allDbRecs = db.select().from(schema.simRecommendations)
+    .where(eq(schema.simRecommendations.status, "pending")).all();
+  for (const dbRec of allDbRecs) {
+    if (!currentRecIds.has(dbRec.id)) {
+      db.update(schema.simRecommendations)
+        .set({ status: "ignored" })
+        .where(eq(schema.simRecommendations.id, dbRec.id))
+        .run();
+    }
+  }
+}
+
+function loadStateFromDb(): SimState | null {
+  if (!isDbMode()) return null;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { db } = require("@/lib/db/client") as typeof import("@/lib/db/client");
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const schema = require("@/lib/db/schema") as typeof import("@/lib/db/schema");
+  const { eq } = require("drizzle-orm") as typeof import("drizzle-orm");
+
+  const stateRow = db.select().from(schema.simState).where(eq(schema.simState.id, 1)).get();
+  if (!stateRow) return null;
+
+  const batchRows = db.select().from(schema.simBatches).all();
+  const eventRows = db.select().from(schema.simEvents).all();
+  const recRows = db.select().from(schema.simRecommendations).all();
+
+  const batches: SimBatch[] = batchRows.map((row) => ({
+    id: row.id,
+    productId: row.productId,
+    productLabel: row.productLabel,
+    lineId: row.lineId,
+    supplierId: row.supplierId,
+    quantity: row.quantity,
+    stage: row.stage as BatchStage,
+    daysInStage: row.daysInStage,
+    baseDays: row.baseDays,
+    delayDays: row.delayDays,
+    flags: JSON.parse(row.flags) as string[],
+    startDay: row.startDay,
+  }));
+
+  const eventLog: SimEvent[] = eventRows.map((row) => ({
+    id: row.id,
+    label: row.label,
+    description: row.description,
+    day: row.day,
+  }));
+
+  const toRec = (row: typeof recRows[0]): Recommendation => ({
+    id: row.id,
+    label: row.label,
+    reasoning: row.reasoning,
+    effectType: row.effectType as EffectType,
+    effectParams: JSON.parse(row.effectParams) as Record<string, unknown>,
+  });
+
+  const pendingRecs = recRows.filter((r) => r.status === "pending").map(toRec);
+  const appliedRecs = recRows.filter((r) => r.status === "applied").map(toRec);
+
+  const lastEvent = stateRow.lastEventId
+    ? eventLog.find((e) => e.id === stateRow.lastEventId) ?? null
+    : null;
+
+  return { currentDay: stateRow.currentDay, batches, lastEvent, pendingRecs, appliedRecs, eventLog };
+}
+
+// ── SimulationEngine ──────────────────────────────────────────────────────────
+
 export class SimulationEngine {
   private state: SimState;
 
   constructor() {
-    this.state = this._freshState();
+    const persisted = loadStateFromDb();
+    this.state = persisted ?? this._freshState();
   }
 
   private _freshState(): SimState {
@@ -124,6 +303,7 @@ export class SimulationEngine {
 
   reset(): SimState {
     this.state = this._freshState();
+    syncStateToDb(this.state);
     return this.getState();
   }
 
@@ -133,6 +313,7 @@ export class SimulationEngine {
       this.state.currentDay++;
       this._tick();
     }
+    syncStateToDb(this.state);
     return this.getState();
   }
 
@@ -169,16 +350,19 @@ export class SimulationEngine {
     this.state.lastEvent = event;
     this.state.eventLog.push(event);
     this.state.pendingRecs = [];
+    syncStateToDb(this.state);
     return this.getState();
   }
 
   applyEventEffect(fn: (batches: SimBatch[]) => void): SimState {
     fn(this.state.batches);
+    syncStateToDb(this.state);
     return this.getState();
   }
 
   setRecommendations(recs: Recommendation[]): void {
     this.state.pendingRecs = recs;
+    syncStateToDb(this.state);
   }
 
   applyRecommendation(rec: Recommendation): SimState {
@@ -239,12 +423,17 @@ export class SimulationEngine {
         }
         break;
       }
-      case "add_safety_stock":
+      case "add_safety_stock": {
+        const partNumber = p["partNumber"] as string;
+        const quantity = (p["quantity"] as number) ?? 0;
+        getFactoryStore().updateInventoryQuantity(partNumber, quantity);
         break;
+      }
     }
 
     this.state.pendingRecs = this.state.pendingRecs.filter((r) => r.id !== rec.id);
     this.state.appliedRecs.push({ ...rec });
+    syncStateToDb(this.state);
     return this.getState();
   }
 }

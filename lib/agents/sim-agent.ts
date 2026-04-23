@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Recommendation } from "@/lib/simulation/engine";
-import { factoryStore } from "@/lib/factory/store";
+import { getFactoryStore } from "@/lib/factory/store";
 
 export type AgentEvent =
   | { type: "tool_call"; toolName: string; args: unknown }
@@ -12,8 +12,9 @@ const SYSTEM_PROMPT = `You are a manufacturing operations analyst for an aerospa
 
 When given an event alert:
 1. Use the factory tools to gather full situational awareness — check affected lines, suppliers, inventory, quality records.
-2. Submit 2–4 specific recommendations using submit_recommendation. Each must include exact IDs (batch IDs, supplier IDs, part numbers) and quantified impact where possible.
-3. Write a concise summary analysis (3–5 sentences) covering: root cause, blast radius, and your prioritised action plan.
+2. When a supplier is delayed, at-risk, or insolvent — or when inventory is critically low — use web_search to find real alternative suppliers. Search for terms like "[component type] aerospace supplier manufacturer" or "[part name] aerospace-grade supplier". Include real supplier names and URLs in your recommendation reasoning.
+3. Submit 2–4 specific recommendations using submit_recommendation. Each must include exact IDs (batch IDs, supplier IDs, part numbers) and quantified impact where possible. If you found real suppliers via web search, name them in the reasoning.
+4. Write a concise summary analysis (3–5 sentences) covering: root cause, blast radius, and your prioritised action plan.
 
 Be specific. Use the tool data. Reference exact IDs and numbers in your reasoning.`;
 
@@ -194,7 +195,7 @@ const SUBMIT_RECOMMENDATION_TOOL: Anthropic.Tool = {
 };
 
 function executeFactoryTool(name: string, input: Record<string, unknown>): unknown {
-  const store = factoryStore;
+  const store = getFactoryStore();
 
   switch (name) {
     case "get_line_status": {
@@ -334,6 +335,12 @@ function executeFactoryTool(name: string, input: Record<string, unknown>): unkno
         ...i, deficit: i.reorderPoint - i.quantityOnHand,
       }));
     }
+    case "add_safety_stock": {
+      const partNumber = input.partNumber as string;
+      const quantity = input.quantity as number;
+      const updated = store.updateInventoryQuantity(partNumber, quantity);
+      return updated ?? { error: `Part ${partNumber} not found` };
+    }
     default:
       return { error: `Unknown tool: ${name}` };
   }
@@ -348,7 +355,13 @@ export async function analyzeEvent(
     maxRetries: 5,
   });
 
-  const allTools = [...FACTORY_TOOLS, SUBMIT_RECOMMENDATION_TOOL];
+  // web_search_20250305 is a server-side tool — Anthropic executes it, no client handling needed
+  const WEB_SEARCH_TOOL = { type: "web_search_20250305", name: "web_search", max_uses: 5 };
+  const allTools = [
+    ...FACTORY_TOOLS,
+    SUBMIT_RECOMMENDATION_TOOL,
+    WEB_SEARCH_TOOL,
+  ] as unknown as Anthropic.Tool[];
   const recommendations: Recommendation[] = [];
 
   const messages: Anthropic.MessageParam[] = [
@@ -366,6 +379,29 @@ export async function analyzeEvent(
       });
 
       messages.push({ role: "assistant", content: response.content });
+
+      // Emit server-side web_search events — Anthropic executes these, results
+      // are already included as web_search_tool_result blocks in response.content
+      for (const rawBlock of response.content as unknown[]) {
+        const block = rawBlock as Record<string, unknown>;
+        if (block["type"] === "server_tool_use" && block["name"] === "web_search") {
+          const query = ((block["input"] as Record<string, unknown>)?.["query"] as string) ?? "";
+          // Find matching result block
+          const resultBlock = (response.content as unknown[]).find(
+            (rb) => (rb as Record<string, unknown>)["type"] === "web_search_tool_result"
+              && (rb as Record<string, unknown>)["tool_use_id"] === block["id"]
+          ) as Record<string, unknown> | undefined;
+          const resultUrls: { url: string; title: string }[] = [];
+          if (Array.isArray(resultBlock?.["content"])) {
+            for (const r of resultBlock["content"] as Record<string, unknown>[]) {
+              if (typeof r["url"] === "string" && typeof r["title"] === "string") {
+                resultUrls.push({ url: r["url"], title: r["title"] });
+              }
+            }
+          }
+          emit({ type: "tool_call", toolName: "web_search", args: { query, resultUrls } });
+        }
+      }
 
       if (response.stop_reason === "end_turn") {
         const text = response.content

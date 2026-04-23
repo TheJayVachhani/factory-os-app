@@ -1,83 +1,68 @@
-import type { ProductionLine, Supplier, QualityInspection, InventoryItem, BOMEntry } from "./types";
-import { seedProductionLines, seedSuppliers, seedInspections, seedInventory, seedBOMs } from "./seed";
+import type {
+  ProductionLine, Supplier, QualityInspection, InventoryItem, BOMEntry,
+} from "./types";
 
-export class FactoryStore {
-  private static instance: FactoryStore;
+// ── Interface ─────────────────────────────────────────────────────────────────
 
-  lines: ProductionLine[] = [];
-  suppliers: Supplier[] = [];
-  inspections: QualityInspection[] = [];
-  inventory: InventoryItem[] = [];
-  boms: BOMEntry[] = [];
+export interface IFactoryStore {
+  // Direct array access (mirrors current agent tool usage)
+  readonly lines: ProductionLine[];
+  readonly suppliers: Supplier[];
+  readonly inspections: QualityInspection[];
+  readonly inventory: InventoryItem[];
+  readonly boms: BOMEntry[];
 
-  private constructor() {
-    this.seed();
-  }
+  // Line queries
+  getLineById(id: string): ProductionLine | undefined;
+  updateLineStatus(lineId: string, status: ProductionLine["status"]): ProductionLine | undefined;
 
-  static getInstance(): FactoryStore {
-    if (!FactoryStore.instance) {
-      FactoryStore.instance = new FactoryStore();
-    }
-    return FactoryStore.instance;
-  }
+  // Supplier queries
+  getSupplierById(id: string): Supplier | undefined;
+  getSuppliersByCountry(country: string): Supplier[];
+  getDelayedSuppliers(): Supplier[];
+  getSuppliersForComponent(partNumber: string): Supplier[];
 
-  seed(): void {
-    this.lines = seedProductionLines();
-    this.suppliers = seedSuppliers();
-    this.inspections = seedInspections();
-    this.inventory = seedInventory();
-    this.boms = seedBOMs();
-  }
+  // Inspection queries
+  getInspectionsByLine(lineId: string): QualityInspection[];
+  getInspectionsByBatch(batchId: string): QualityInspection[];
 
-  getLineById(id: string): ProductionLine | undefined {
-    return this.lines.find((l) => l.id === id);
-  }
+  // Inventory queries
+  getInventoryByPart(partNumber: string): InventoryItem | undefined;
+  getItemsBelowReorder(): InventoryItem[];
+  updateInventoryQuantity(partNumber: string, delta: number): InventoryItem | undefined;
 
-  getSupplierById(id: string): Supplier | undefined {
-    return this.suppliers.find((s) => s.id === id);
-  }
-
-  getSuppliersByCountry(country: string): Supplier[] {
-    return this.suppliers.filter((s) => s.country.toLowerCase() === country.toLowerCase());
-  }
-
-  getDelayedSuppliers(): Supplier[] {
-    return this.suppliers.filter((s) => s.status === "delayed" || s.status === "at-risk");
-  }
-
-  getInspectionsByLine(lineId: string): QualityInspection[] {
-    return this.inspections.filter((i) => i.lineId === lineId);
-  }
-
-  getInspectionsByBatch(batchId: string): QualityInspection[] {
-    return this.inspections.filter((i) => i.batchId === batchId);
-  }
-
-  getInventoryByPart(partNumber: string): InventoryItem | undefined {
-    return this.inventory.find((i) => i.partNumber === partNumber);
-  }
-
-  getItemsBelowReorder(): InventoryItem[] {
-    return this.inventory.filter((i) => i.quantityOnHand <= i.reorderPoint);
-  }
-
-  getBOM(productId: string): BOMEntry | undefined {
-    return this.boms.find((b) => b.productId === productId);
-  }
-
-  getSuppliersForComponent(partNumber: string): Supplier[] {
-    return this.suppliers.filter((s) => s.components.includes(partNumber));
-  }
-
-  updateLineStatus(lineId: string, status: ProductionLine["status"]): ProductionLine | undefined {
-    const line = this.getLineById(lineId);
-    if (line) {
-      line.status = status;
-      if (status !== "running") line.throughputPerHour = 0;
-    }
-    return line;
-  }
+  // BOM queries
+  getBOM(productId: string): BOMEntry | undefined;
 }
 
-// Module-scope singleton
-export const factoryStore = FactoryStore.getInstance();
+// ── Factory function ──────────────────────────────────────────────────────────
+
+let _store: IFactoryStore | null = null;
+
+export function getFactoryStore(): IFactoryStore {
+  if (_store) return _store;
+
+  if (process.env.DATA_SOURCE === "db") {
+    // Dynamic import keeps better-sqlite3 out of the module graph when DATA_SOURCE=sim
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DatabaseFactoryStore } = require("./store-db") as typeof import("./store-db");
+    _store = DatabaseFactoryStore.getInstance();
+  } else {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { SimulatedFactoryStore } = require("./store-sim") as typeof import("./store-sim");
+    _store = SimulatedFactoryStore.getInstance();
+  }
+
+  return _store!;
+}
+
+// Backward-compat export used by existing API routes and agent
+export const factoryStore = new Proxy({} as IFactoryStore, {
+  get(_target, prop) {
+    return (getFactoryStore() as unknown as Record<string | symbol, unknown>)[prop];
+  },
+  set(_target, prop, value) {
+    (getFactoryStore() as unknown as Record<string | symbol, unknown>)[prop] = value;
+    return true;
+  },
+});

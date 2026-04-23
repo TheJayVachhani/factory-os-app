@@ -38,14 +38,41 @@ export function AgentPanel({ isAnalyzing, toolCalls, agentResponse, recommendati
           {!hasActivity && (
             <p className="text-zinc-600 text-center pt-6">Trigger an event to activate the agent.</p>
           )}
-          {toolCalls.map((tc, i) => (
-            <div key={i} className="rounded bg-zinc-900/60 border border-zinc-700/40 px-2 py-1.5">
-              <div className="text-cyan-400 font-semibold">{tc.toolName}()</div>
-              <div className="text-zinc-500 text-[10px] mt-0.5 truncate">
-                {JSON.stringify(tc.args).slice(0, 80)}
+          {toolCalls.map((tc, i) => {
+            if (tc.toolName === "web_search") {
+              const { query, resultUrls = [] } = tc.args as { query: string; resultUrls?: { url: string; title: string }[] };
+              return (
+                <div key={i} className="rounded bg-zinc-900/60 border border-blue-800/40 px-2 py-1.5">
+                  <div className="text-blue-400 font-semibold">⌕ web_search()</div>
+                  <div className="text-zinc-400 text-[10px] mt-0.5 italic truncate">"{query}"</div>
+                  {resultUrls.length > 0 && (
+                    <div className="mt-1 space-y-0.5">
+                      {resultUrls.slice(0, 4).map((r, j) => (
+                        <a
+                          key={j}
+                          href={r.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="block text-[10px] text-blue-400/80 hover:text-blue-300 truncate underline underline-offset-2"
+                          title={r.title}
+                        >
+                          {r.title}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <div key={i} className="rounded bg-zinc-900/60 border border-zinc-700/40 px-2 py-1.5">
+                <div className="text-cyan-400 font-semibold">{tc.toolName}()</div>
+                <div className="text-zinc-500 text-[10px] mt-0.5 truncate">
+                  {JSON.stringify(tc.args).slice(0, 80)}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           {agentResponse && (
             <div className="rounded bg-zinc-900/60 border border-green-800/40 px-2 py-1.5">
               <div className="text-green-400 font-semibold mb-1">Analysis</div>

@@ -5,12 +5,14 @@ import { SURPRISE_EVENTS } from "@/lib/simulation/events";
 interface ControlPanelProps {
   currentDay: number;
   isAnalyzing: boolean;
+  isAutoRunning: boolean;
   onAdvance: (days: number) => void;
   onTriggerEvent: (eventId: string) => void;
   onReset: () => void;
+  onToggleAutoRun: () => void;
 }
 
-export function ControlPanel({ currentDay, isAnalyzing, onAdvance, onTriggerEvent, onReset }: ControlPanelProps) {
+export function ControlPanel({ currentDay, isAnalyzing, isAutoRunning, onAdvance, onTriggerEvent, onReset, onToggleAutoRun }: ControlPanelProps) {
   const atEnd = currentDay >= 90;
 
   return (
@@ -41,6 +43,25 @@ export function ControlPanel({ currentDay, isAnalyzing, onAdvance, onTriggerEven
             +{d} Day{d !== 1 ? "s" : ""}
           </button>
         ))}
+      </div>
+
+      {/* Auto-run */}
+      <div className="rounded-lg border border-zinc-700/60 bg-zinc-800/60 p-3 space-y-2">
+        <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Auto-Run</div>
+        <button
+          onClick={onToggleAutoRun}
+          disabled={atEnd || isAnalyzing}
+          className={`w-full rounded px-2 py-1.5 text-xs font-mono font-medium border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+            isAutoRunning
+              ? "bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/20"
+              : "bg-emerald-500/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20"
+          }`}
+        >
+          {isAutoRunning ? "⏸ Pause" : "▶ Run"}
+        </button>
+        {isAutoRunning && (
+          <p className="text-[9px] font-mono text-zinc-600 text-center">+1 day every 2s</p>
+        )}
       </div>
 
       {/* Events */}
